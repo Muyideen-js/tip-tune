@@ -121,7 +121,22 @@ export class PayoutsService {
     requestingUserId: string,
     dto: CreatePayoutDto,
   ): Promise<PayoutRequest> {
-    const { artistId, amount, assetCode, destinationAddress } = dto;
+    const { artistId, amount, assetCode, destinationAddress, idempotencyKey } = dto;
+
+    // Idempotency check: if a key was supplied and we already have a row for it,
+    // replay the original result without creating a duplicate pending request.
+    if (idempotencyKey) {
+      const existing = await this.payoutRepo.findOne({
+        where: { idempotencyKey },
+      });
+      if (existing) {
+        this.logger.log(
+          `Replaying idempotent payout result for key "${idempotencyKey}" (id: ${existing.id})`,
+        );
+        return existing;
+      }
+    }
+
     const artist = await this.assertArtistOwnership(requestingUserId, artistId);
 
     // 1. Minimum threshold check
@@ -197,6 +212,7 @@ export class PayoutsService {
         assetCode,
         destinationAddress,
         status: PayoutStatus.PENDING,
+        idempotencyKey: idempotencyKey ?? null,
       });
 
       const saved = await qr.manager.getRepository(PayoutRequest).save(payout);

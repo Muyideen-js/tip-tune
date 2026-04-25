@@ -1,4 +1,5 @@
 import { Injectable, BadRequestException, Logger } from '@nestjs/common';
+import { IStorageProvider, StorageFileResult, StorageFileInfo } from './storage-provider.interface';
 import { ConfigService } from '@nestjs/config';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
@@ -48,7 +49,7 @@ const MIME_TO_EXTENSIONS: Record<string, string[]> = {
 };
 
 @Injectable()
-export class StorageService {
+export class StorageService implements IStorageProvider {
   private readonly logger = new Logger(StorageService.name);
   private readonly allowedMimeTypes = [
     'audio/mpeg',

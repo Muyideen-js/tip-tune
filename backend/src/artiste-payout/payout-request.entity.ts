@@ -52,4 +52,13 @@ export class PayoutRequest {
 
   @Column({ type: 'timestamp', nullable: true })
   processedAt: Date | null;
+
+  /**
+   * Client-supplied idempotency key.
+   * The same key always replays the original result instead of creating a
+   * duplicate pending row, making retries safe.
+   */
+  @Column({ type: 'varchar', length: 128, nullable: true, unique: true })
+  @Index()
+  idempotencyKey: string | null;
 }

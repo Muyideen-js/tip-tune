@@ -9,6 +9,7 @@ import { ArtistStatus } from "../artist-status/entities/artist-status.entity";
 import { SearchQueryDto, SearchType, SortOption } from "./dto/search-query.dto";
 import { SearchSuggestionsQueryDto } from "./dto/search-suggestions-query.dto";
 import { PaginatedResult } from "@/events-live-show/events.service";
+import { SearchVisibilityPolicy } from "./search-visibility.policy";
 
 const SIMILARITY_THRESHOLD = 0.1;
 const FUZZY_WEIGHT = 0.5;
@@ -94,6 +95,9 @@ export class SearchService {
         "status",
         "status.showOnProfile = true",
       );
+
+    // Enforce centralised visibility rules before any other predicates
+    SearchVisibilityPolicy.applyArtistVisibility(qb, "artist");
 
     if (hasQuery) {
       if (tsQuery) {
@@ -193,6 +197,10 @@ export class SearchService {
         "status.showOnProfile = true",
       );
 
+    // Enforce centralised visibility rules — excludes deleted/private tracks
+    // and tracks whose artist is deleted or hidden
+    SearchVisibilityPolicy.applyTrackVisibility(qb, "track", "artist");
+
     if (hasQuery) {
       if (tsQuery) {
         qb.setParameter("tsQuery", tsQuery);
@@ -288,7 +296,7 @@ export class SearchService {
     const take = type ? limit : Math.ceil(limit / 2);
 
     if (!type || type === "artist") {
-      const artists = await this.artistRepo
+      const artistSuggQb = this.artistRepo
         .createQueryBuilder("artist")
         .select([
           "artist.id",
@@ -301,7 +309,12 @@ export class SearchService {
         .where(
           `(artist."artistName" ILIKE :like OR artist.genre ILIKE :like)`,
           { like },
-        )
+        );
+
+      // Apply visibility policy to suggestions — hidden/deleted artists must not appear
+      SearchVisibilityPolicy.applyArtistVisibility(artistSuggQb, "artist");
+
+      const artists = await artistSuggQb
         // Pre-sort: prefix match first, then tips descending as a cheap DB-level hint.
         // The frontend applies the full scored ranking after receiving the payload.
         .orderBy(
@@ -326,7 +339,7 @@ export class SearchService {
     }
 
     if (!type || type === "track") {
-      const tracks = await this.trackRepo
+      const trackSuggQb = this.trackRepo
         .createQueryBuilder("track")
         .leftJoinAndSelect("track.artist", "artist")
         .select([
@@ -339,8 +352,12 @@ export class SearchService {
           "artist.id",
           "artist.artistName",
         ])
-        .where(`(track.title ILIKE :like OR track.genre ILIKE :like)`, { like })
-        .andWhere("track.isPublic = :isPublic", { isPublic: true })
+        .where(`(track.title ILIKE :like OR track.genre ILIKE :like)`, { like });
+
+      // Apply visibility policy — replaces the inline isPublic check with the full policy
+      SearchVisibilityPolicy.applyTrackVisibility(trackSuggQb, "track", "artist");
+
+      const tracks = await trackSuggQb
         // Same DB-level hint for tracks
         .orderBy(
           `CASE WHEN track.title ILIKE :prefix THEN 0 ELSE 1 END`,

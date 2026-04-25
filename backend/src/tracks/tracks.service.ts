@@ -20,6 +20,7 @@ import { LicensingService } from "@/track-listening-right-management/licensing.s
 import { PaginatedResult } from "@/events-live-show/events.service";
 import { ResourceNotFoundException } from "../common/exceptions/api-exception";
 import { PlayCountService } from "../track-play-count/play-count.service";
+import { TrackFileReaperService } from "./track-file-reaper.service";
 
 @Injectable()
 export class TracksService {
@@ -34,6 +35,7 @@ export class TracksService {
     private eventEmitter: EventEmitter2,
     private licensingService: LicensingService,
     private playCountService: PlayCountService,
+    private readonly reaperService: TrackFileReaperService,
   ) {}
 
   async create(
@@ -49,7 +51,8 @@ export class TracksService {
       let mimeType: string;
 
       if (file) {
-        // Save file first
+        // Phase 1: persist the file to storage.
+        // If Phase 2 (DB save) fails below, the reaper will delete this file.
         const fileResult = await this.storageService.saveFile(file);
         const fileInfo = await this.storageService.getFileInfo(
           fileResult.filename,
@@ -65,7 +68,8 @@ export class TracksService {
         audioUrl = url;
       }
 
-      // Create track record
+      // Phase 2: persist the DB record.
+      // If this fails and a file was written in Phase 1, compensate immediately.
       const track = this.tracksRepository.create({
         ...createTrackDto,
         audioUrl,
@@ -76,7 +80,16 @@ export class TracksService {
         mimeType,
       });
 
-      const savedTrack = await this.tracksRepository.save(track);
+      let savedTrack: Track;
+      try {
+        savedTrack = await this.tracksRepository.save(track);
+      } catch (dbError) {
+        // Compensating action: remove the orphaned file we wrote in Phase 1.
+        if (filename) {
+          await this.reaperService.cleanupOrphanedFile(filename);
+        }
+        throw dbError;
+      }
       this.logger.log(`Track created successfully: ${savedTrack.id}`);
 
       try {
@@ -208,13 +221,31 @@ export class TracksService {
     const track = await this.findOne(id);
 
     try {
-      // Delete file from storage if it exists
-      if (track.filename) {
-        await this.storageService.deleteFile(track.filename);
-      }
+      // Phase 1: soft-delete the DB row first so the record is preserved
+      // even if storage deletion fails.  The reaper will retry the file
+      // deletion asynchronously using track.filename.
+      await this.tracksRepository.softDelete(id);
+      this.logger.log(`Track soft-deleted: ${id}`);
 
-      // Delete track record
-      await this.tracksRepository.remove(track);
+      // Phase 2: attempt immediate file deletion.
+      // If it fails, the reaper will clean it up from the soft-deleted row.
+      if (track.filename) {
+        try {
+          await this.storageService.deleteFile(track.filename);
+          // Clear filename so the reaper skips it on the next run
+          await this.tracksRepository
+            .createQueryBuilder()
+            .update(Track)
+            .set({ filename: null as unknown as string })
+            .where('id = :id', { id })
+            .withDeleted()
+            .execute();
+        } catch (storageErr) {
+          this.logger.warn(
+            `Storage delete failed for track ${id} — reaper will retry: ${storageErr instanceof Error ? storageErr.message : String(storageErr)}`,
+          );
+        }
+      }
 
       this.logger.log(`Track deleted successfully: ${id}`);
     } catch (error) {
